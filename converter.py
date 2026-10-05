@@ -1,6 +1,7 @@
 """
 Core RAW/C-RAW to JPEG conversion engine.
 Supports Canon CR3 (C-RAW), CR2, CRW, ARW, NEF, DNG, and other camera RAW formats.
+Engineered for maximum image fidelity with 100% quality and 4:4:4 chroma subsampling.
 """
 
 import io
@@ -36,9 +37,10 @@ RAW_EXTENSIONS = {
 
 @dataclass
 class ConversionOptions:
-    """Options to control the RAW to JPEG conversion process."""
-    quality: int = 95
-    mode: str = "develop"  # 'develop' (high quality RAW demosaic), 'extract' (embedded preview), 'auto'
+    """Options to control the RAW to JPEG conversion process with maximum quality."""
+    quality: int = 100               # 100 = Maximum uncompressed JPEG quality
+    subsampling: int = 0             # 0 = 4:4:4 chroma (NO color resolution loss)
+    mode: str = "develop"            # 'develop' (RAW demosaic), 'extract' (embedded preview), 'auto'
     use_camera_wb: bool = True
     use_auto_wb: bool = False
     bright: float = 1.0
@@ -46,7 +48,7 @@ class ConversionOptions:
     max_dimension: Optional[int] = None
     preserve_exif: bool = True
     optimize: bool = True
-    progressive: bool = True
+    progressive: bool = False        # False for purest standard baseline encoding
 
 
 @dataclass
@@ -71,8 +73,8 @@ def is_raw_file(file_path: Path | str) -> bool:
 
 def extract_embedded_jpeg(raw_path: Path) -> Optional[Image.Image]:
     """
-    Attempt to extract the embedded full-resolution or preview JPEG from RAW metadata.
-    Fastest method and produces camera-processed colors.
+    Extract the embedded camera-processed JPEG from RAW metadata.
+    Preserves exact camera color profile and in-camera processing.
     """
     try:
         with rawpy.imread(str(raw_path)) as raw:
@@ -93,14 +95,14 @@ def extract_embedded_jpeg(raw_path: Path) -> Optional[Image.Image]:
 
 def develop_raw_image(raw_path: Path, options: ConversionOptions) -> Image.Image:
     """
-    Demosaic and develop raw sensor data using rawpy/LibRaw into an RGB PIL Image.
+    Demosaic and develop raw sensor data using LibRaw at maximum fidelity.
     """
     with rawpy.imread(str(raw_path)) as raw:
         # Determine white balance settings
         use_camera_wb = options.use_camera_wb and not options.use_auto_wb
         use_auto_wb = options.use_auto_wb
 
-        # Convert raw to RGB numpy array
+        # Convert raw to RGB numpy array with highest quality demosaicing
         rgb_array = raw.postprocess(
             use_camera_wb=use_camera_wb,
             use_auto_wb=use_auto_wb,
@@ -110,7 +112,7 @@ def develop_raw_image(raw_path: Path, options: ConversionOptions) -> Image.Image
             output_bps=8,
             no_auto_bright=False,
             auto_bright_thr=0.01,
-            demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD
+            demosaic_algorithm=rawpy.DemosaicAlgorithm.AAHD if hasattr(rawpy.DemosaicAlgorithm, 'AAHD') else rawpy.DemosaicAlgorithm.AHD
         )
 
         img = Image.fromarray(rgb_array)
@@ -123,12 +125,12 @@ def convert_file(
     options: Optional[ConversionOptions] = None
 ) -> ConversionResult:
     """
-    Convert a single RAW / C-RAW file to JPEG format.
+    Convert a single RAW / C-RAW file to high-quality JPEG format.
 
     Args:
         input_path: Path to the input RAW file.
-        output_path: Destination path for the output JPEG. Defaults to same directory with .jpg/.jpeg.
-        options: ConversionOptions controlling quality, mode, resizing, etc.
+        output_path: Destination path for the output JPEG.
+        options: ConversionOptions controlling quality, chroma subsampling, resizing, etc.
 
     Returns:
         ConversionResult detailing success status, paths, sizes, and any error message.
@@ -147,7 +149,6 @@ def convert_file(
             error_message=f"Input file not found: {input_path}"
         )
 
-    # Determine default output path if not specified
     if output_path is None:
         output_path = input_path.with_suffix(".jpg")
     else:
@@ -164,33 +165,32 @@ def convert_file(
         if options.mode == "extract":
             img = extract_embedded_jpeg(input_path)
             if img is not None:
-                method_used = "embedded_preview"
+                method_used = "embedded_camera_jpeg"
             else:
-                raise ValueError("No embedded JPEG thumbnail/preview found in RAW file")
+                raise ValueError("No embedded JPEG preview found in RAW file")
 
         elif options.mode == "develop":
             img = develop_raw_image(input_path, options)
-            method_used = "raw_demosaic"
+            method_used = "raw_demosaic_hq"
 
         elif options.mode == "auto":
-            # Try high quality demosaic first, fallback to embedded preview
             try:
                 img = develop_raw_image(input_path, options)
-                method_used = "raw_demosaic"
+                method_used = "raw_demosaic_hq"
             except Exception as e:
                 logger.warning(f"RAW demosaic failed ({e}), falling back to embedded preview extraction.")
                 img = extract_embedded_jpeg(input_path)
                 if img is not None:
-                    method_used = "embedded_preview (fallback)"
+                    method_used = "embedded_camera_jpeg (fallback)"
                 else:
                     raise RuntimeError(f"Both RAW demosaic and embedded preview failed: {e}")
         else:
-            raise ValueError(f"Unknown conversion mode '{options.mode}'. Choose from 'develop', 'extract', 'auto'.")
+            raise ValueError(f"Unknown conversion mode '{options.mode}'.")
 
         if img is None:
             raise RuntimeError("Failed to decode image from RAW file")
 
-        # Handle EXIF orientation if needed
+        # Handle EXIF orientation
         try:
             img = ImageOps.exif_transpose(img)
         except Exception:
@@ -204,14 +204,15 @@ def convert_file(
                 new_size = (int(width * ratio), int(height * ratio))
                 img = img.resize(new_size, Image.Resampling.LANCZOS)
 
-        # Convert to RGB mode (in case it was RGBA or other)
+        # Convert to RGB mode
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Save to JPEG
+        # Save to JPEG at MAXIMUM quality with 4:4:4 chroma subsampling (no quality degradation)
         save_kwargs: Dict[str, Any] = {
             "format": "JPEG",
             "quality": max(1, min(100, options.quality)),
+            "subsampling": options.subsampling,  # 0 = 4:4:4 full color fidelity
             "optimize": options.optimize,
             "progressive": options.progressive
         }

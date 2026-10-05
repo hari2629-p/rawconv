@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 C-RAW to JPEG Batch Converter CLI
-Fast, high-quality Canon C-RAW / CR3 / CR2 and Camera RAW converter.
+Fast, maximum-fidelity Canon C-RAW / CR3 / CR2 and Camera RAW converter.
+Saves converted images at 100% quality (4:4:4 color fidelity) inside a dedicated 'converted_jpegs' folder.
 """
 
 import sys
@@ -36,6 +37,7 @@ from converter import (
 )
 
 console = Console()
+OUTPUT_FOLDER_NAME = "converted_jpegs"
 
 
 def format_bytes(size_bytes: int) -> str:
@@ -53,6 +55,7 @@ def collect_raw_files(
 ) -> List[Path]:
     """
     Collect all matching RAW files from a list of paths, glob patterns, or folders.
+    Ignores output directories (converted_jpegs) automatically.
     """
     found_files: List[Path] = []
     seen = set()
@@ -63,6 +66,8 @@ def collect_raw_files(
             matched = glob.glob(target, recursive=recursive)
             for m in matched:
                 p = Path(m).resolve()
+                if OUTPUT_FOLDER_NAME in p.parts:
+                    continue
                 if p.is_file() and is_raw_file(p) and p not in seen:
                     found_files.append(p)
                     seen.add(p)
@@ -70,12 +75,14 @@ def collect_raw_files(
 
         p = Path(target).resolve()
         if p.is_file():
-            if p not in seen:
+            if OUTPUT_FOLDER_NAME not in p.parts and p not in seen and is_raw_file(p):
                 found_files.append(p)
                 seen.add(p)
         elif p.is_dir():
             pattern = "**/*" if recursive else "*"
             for item in p.glob(pattern):
+                if OUTPUT_FOLDER_NAME in item.parts:
+                    continue
                 if item.is_file() and is_raw_file(item) and item not in seen:
                     found_files.append(item)
                     seen.add(item)
@@ -105,24 +112,21 @@ def build_output_path(
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert Canon C-RAW (.craw / .cr3 / .cr2) and camera RAW files to JPEG.",
+        description="Convert Canon C-RAW (.craw / .cr3 / .cr2) and camera RAW files to JPEG (100% Quality).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Convert a single C-RAW file:
-  python craw2jpeg.py photo.cr3
+  # Convert all RAW files in a folder into a 'converted_jpegs' subfolder:
+  python craw2jpeg.py "C:\\path\\to\\photos"
 
-  # Convert all RAW files in a folder to an output directory:
-  python craw2jpeg.py ./raw_photos/ -o ./jpeg_photos/
+  # Convert with subfolders recursively:
+  python craw2jpeg.py "C:\\path\\to\\photos" -r
 
-  # Recursively convert with custom quality and 8 threads:
-  python craw2jpeg.py ./photos/ -o ./output/ -r -q 90 -t 8
+  # Convert and specify custom output folder:
+  python craw2jpeg.py "C:\\path\\to\\photos" -o "D:\\Export"
 
-  # Fast conversion using embedded high-res preview:
-  python craw2jpeg.py ./photos/ -o ./output/ --mode extract
-
-  # Resize images to max 3840px (4K):
-  python craw2jpeg.py ./photos/ -o ./output/ --max-size 3840
+  # Interactive mode (prompts for folder):
+  python craw2jpeg.py
         """
     )
 
@@ -130,25 +134,25 @@ Examples:
         "inputs",
         nargs="*",
         default=[],
-        help="Input RAW file(s), folder(s), or glob pattern(s) (e.g. photos/ or *.cr3)"
+        help="Input RAW folder(s), file(s), or glob pattern(s)"
     )
     parser.add_argument(
         "-o", "--output",
         default=None,
-        help="Destination directory (for batches) or output file path (for single file)"
+        help="Custom destination directory (default: 'converted_jpegs' inside input directory)"
     )
     parser.add_argument(
         "-q", "--quality",
         type=int,
-        default=95,
-        help="JPEG quality factor (1-100, default: 95)"
+        default=100,
+        help="JPEG quality factor (1-100, default: 100 for uncompromised fidelity)"
     )
     parser.add_argument(
         "-m", "--mode",
         choices=["develop", "extract", "auto"],
         default="develop",
-        help="Conversion mode: 'develop' (RAW sensor demosaic, highest quality), "
-             "'extract' (instant embedded JPEG extraction), 'auto' (develop with fallback) [default: develop]"
+        help="Conversion mode: 'develop' (Full RAW sensor demosaic, highest quality), "
+             "'extract' (instant embedded camera JPEG extraction), 'auto' (develop with fallback) [default: develop]"
     )
     parser.add_argument(
         "-t", "--threads",
@@ -159,7 +163,7 @@ Examples:
     parser.add_argument(
         "-r", "--recursive",
         action="store_true",
-        help="Recursively scan subdirectories for RAW files"
+        help="Recursively scan and convert subdirectories"
     )
     parser.add_argument(
         "--overwrite",
@@ -175,12 +179,12 @@ Examples:
     parser.add_argument(
         "--half-size",
         action="store_true",
-        help="Fast half-resolution demosaic (useful for fast drafts)"
+        help="Fast half-resolution demosaic"
     )
     parser.add_argument(
         "--auto-wb",
         action="store_true",
-        help="Use automatic white balance instead of camera white balance"
+        help="Use automatic white balance instead of camera metadata"
     )
     parser.add_argument(
         "--brightness",
@@ -204,7 +208,8 @@ def main():
     console.print(
         Panel(
             "[bold cyan]Canon C-RAW & Camera RAW to JPEG Converter[/bold cyan]\n"
-            f"[dim]Supported formats: {', '.join(sorted(list(RAW_EXTENSIONS)[:8]))} ...[/dim]",
+            "[bold green]Quality: 100% (4:4:4 Uncompromised Chroma)[/bold green] | "
+            f"[dim]Supported: {', '.join(sorted(list(RAW_EXTENSIONS)[:7]))} ...[/dim]",
             border_style="cyan",
             box=box.ROUNDED
         )
@@ -212,7 +217,7 @@ def main():
 
     # If no inputs provided on command line, prompt interactively
     if not args.inputs:
-        console.print("[bold yellow]No folder or file specified on command line.[/bold yellow]")
+        console.print("[bold yellow]No folder specified.[/bold yellow]")
         folder_input = console.input("[bold green]Enter the folder path containing your C-RAW files: [/bold green]").strip(' "\'')
         if not folder_input:
             console.print("[red]No path entered. Exiting.[/red]")
@@ -225,11 +230,11 @@ def main():
             args.recursive = True
 
     # 1. Collect files
-    with console.status("[bold green]Scanning input paths for RAW files...[/bold green]"):
+    with console.status("[bold green]Scanning input directory for RAW files...[/bold green]"):
         files = collect_raw_files(args.inputs, recursive=args.recursive)
 
     if not files:
-        console.print("[bold red]No matching RAW files found.[/bold red]")
+        console.print("[bold red]No matching RAW files found in the specified path.[/bold red]")
         sys.exit(1)
 
     console.print(f"[bold green]Found {len(files)} RAW file(s) to process.[/bold green]")
@@ -237,6 +242,7 @@ def main():
     # 2. Configure options
     options = ConversionOptions(
         quality=args.quality,
+        subsampling=0,  # 4:4:4 full color resolution, no compression degradation
         mode=args.mode,
         use_camera_wb=not args.auto_wb,
         use_auto_wb=args.auto_wb,
@@ -245,32 +251,26 @@ def main():
         max_dimension=args.max_size
     )
 
-    # 3. Determine base input directory for relative structure if output directory is used
+    # 3. Determine output directory
     first_input = Path(args.inputs[0]).resolve()
     base_input_dir = first_input if first_input.is_dir() else first_input.parent
 
-    # Check if single file output was specified as a file (e.g. -o output.jpg)
-    single_file_target = None
-    if len(files) == 1 and args.output and not Path(args.output).is_dir() and Path(args.output).suffix.lower() in [".jpg", ".jpeg"]:
-        single_file_target = Path(args.output).resolve()
-        output_dir = single_file_target.parent
-    elif args.output:
+    # Determine destination folder
+    if args.output:
         output_dir = Path(args.output).resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
     else:
-        output_dir = None
+        # Default: automatically create 'converted_jpegs' INSIDE the input directory
+        output_dir = base_input_dir / OUTPUT_FOLDER_NAME
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"[bold cyan]Saving converted images to:[/bold cyan] [white underline]{output_dir}[/white underline]")
 
     # Prepare jobs
     conversion_tasks: List[Tuple[Path, Path]] = []
     skipped_count = 0
 
     for f in files:
-        if single_file_target:
-            out_p = single_file_target
-        elif output_dir:
-            out_p = build_output_path(f, base_input_dir, output_dir, preserve_subdirs=args.recursive)
-        else:
-            out_p = f.with_suffix(".jpg")
+        out_p = build_output_path(f, base_input_dir, output_dir, preserve_subdirs=args.recursive)
 
         if out_p.exists() and not args.overwrite:
             skipped_count += 1
@@ -279,13 +279,13 @@ def main():
         conversion_tasks.append((f, out_p))
 
     if skipped_count > 0:
-        console.print(f"[yellow]Skipping {skipped_count} file(s) that already exist (use --overwrite to force).[/yellow]")
+        console.print(f"[yellow]Skipping {skipped_count} file(s) already converted in destination (use --overwrite to re-process).[/yellow]")
 
     if not conversion_tasks:
-        console.print("[bold green]All files are already converted. Nothing to do.[/bold green]")
+        console.print("[bold green]All files have already been converted in the output folder.[/bold green]")
         return
 
-    console.print(f"[cyan]Starting conversion with {min(args.threads, len(conversion_tasks))} threads (Mode: [bold]{args.mode}[/bold], Quality: [bold]{args.quality}[/bold])...[/cyan]\n")
+    console.print(f"[cyan]Starting conversion with {min(args.threads, len(conversion_tasks))} threads (Quality: [bold]{args.quality}% / 4:4:4[/bold], Mode: [bold]{args.mode}[/bold])...[/cyan]\n")
 
     results: List[ConversionResult] = []
     start_total_time = time.perf_counter()
@@ -340,14 +340,12 @@ def main():
     table.add_row("Total Files Processed", str(len(files)))
     table.add_row("Successfully Converted", f"[green]{len(success_results)}[/green]")
     if skipped_count:
-        table.add_row("Skipped (Existing)", f"[yellow]{skipped_count}[/yellow]")
+        table.add_row("Skipped (Already Exists)", f"[yellow]{skipped_count}[/yellow]")
     if failed_results:
         table.add_row("Failed", f"[red]{len(failed_results)}[/red]")
-    table.add_row("Total RAW Size", format_bytes(total_input_bytes))
-    table.add_row("Total JPEG Size", format_bytes(total_output_bytes))
-    if total_input_bytes > 0:
-        ratio = (1 - (total_output_bytes / total_input_bytes)) * 100
-        table.add_row("Space Saved", f"[green]{ratio:.1f}%[/green]")
+    table.add_row("Output Folder", str(output_dir))
+    table.add_row("Total RAW Input Size", format_bytes(total_input_bytes))
+    table.add_row("Total JPEG Output Size", format_bytes(total_output_bytes))
     table.add_row("Elapsed Time", f"{total_duration:.2f}s")
     if total_duration > 0 and len(success_results) > 0:
         speed = len(success_results) / total_duration
